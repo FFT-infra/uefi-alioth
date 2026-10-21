@@ -18,6 +18,12 @@
 
 #include "Sec.h"
 
+// First argument (x0) of the previous stage, saved by ModuleEntryPoint.S.
+extern UINT64  gSecEntryArg0;
+
+// Helper.S: clean and invalidate every data cache level by set/way.
+extern VOID  SecCleanInvalidateDataCacheAll (VOID);
+
 #ifndef MDEPKG_NDEBUG
 STATIC
 VOID
@@ -130,6 +136,14 @@ SecMain (VOID)
     return;
   }
 
+  // Pass the bootloader argument (a DTB address for a Linux-style loader) to
+  // platform DXE drivers.
+  {
+    UINT64  EntryArg = gSecEntryArg0;
+
+    BuildGuidDataHob (&gSiliciumEntryArgHobGuid, &EntryArg, sizeof (EntryArg));
+  }
+
   // Run Library Cconstructors
   ProcessLibraryConstructorList ();
 
@@ -150,6 +164,10 @@ SecMain (VOID)
 VOID
 SecEntry (VOID)
 {
+  // The previous stage ran with its caches on. Clean and invalidate those
+  // lines before using memory with the MMU and caches off.
+  SecCleanInvalidateDataCacheAll ();
+
   // Disable Data Cache
   ArmDisableDataCache ();
 
@@ -159,9 +177,10 @@ SecEntry (VOID)
   // Enable Instruction Cache
   ArmEnableInstructionCache ();
 
-  // Invalidate Stack & UEFI FD D-Cache
-  InvalidateDataCacheRange ((VOID *)FixedPcdGet64 (PcdCPUCoresStackBase), FixedPcdGet32 (PcdCPUCorePrimaryStackSize));
-  InvalidateDataCacheRange ((VOID *)FixedPcdGet64 (PcdFdBaseAddress),     FixedPcdGet32 (PcdFdSize));
+  // Write back and invalidate the entry stack and firmware volume. A plain
+  // invalidate would discard gSecEntryArg0 and live stack frames.
+  WriteBackInvalidateDataCacheRange ((VOID *)FixedPcdGet64 (PcdCPUCoresStackBase), FixedPcdGet32 (PcdCPUCorePrimaryStackSize));
+  WriteBackInvalidateDataCacheRange ((VOID *)FixedPcdGet64 (PcdFdBaseAddress),     FixedPcdGet32 (PcdFdSize));
 
   // Verify Exception Vector Table
   ASSERT (((UINTN)SecVectorTable & ARM_VECTOR_TABLE_ALIGNMENT) == 0);

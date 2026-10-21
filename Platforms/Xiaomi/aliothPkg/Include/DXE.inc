@@ -47,6 +47,13 @@
   INF FatPkg/EnhancedFatDxe/Fat.inf
   INF MdeModulePkg/Universal/Disk/UnicodeCollation/EnglishDxe/EnglishDxe.inf
 
+  # The boot image ramdisk (ALIOTHESP) as a read-only block device. Every
+  # range comes from the bootloader-provided device tree.
+  INF shengPkg/Drivers/ShengBootMemoryDxe/ShengBootMemoryDxe.inf
+  # DarwinBoot is in the firmware because this image's verification refuses a
+  # driver loaded from a volume.
+  INF DarwinBootPkg/Driver/DarwinBoot.inf
+
   INF Binaries/alioth/QcomPkg/Drivers/DALSYSDxe/DALSYSDxe.inf
   INF Binaries/alioth/QcomPkg/Drivers/ClockDxe/ClockDxe.inf
   INF Binaries/alioth/QcomPkg/Drivers/VcsDxe/VcsDxe.inf

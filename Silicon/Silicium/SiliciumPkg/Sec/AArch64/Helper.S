@@ -44,4 +44,62 @@ ASM_FUNC (SetupExceptionLevel2)
 
   ret
 
+//
+// Cleans and invalidates every data cache level up to the Level of Coherence
+// by set/way. The previous stage runs with its caches on and leaves lines that
+// this firmware never wrote; without this, those lines can hide the HOB data
+// written with caches off or be written back over it after the MMU is enabled.
+//
+ASM_FUNC (SecCleanInvalidateDataCacheAll)
+  dmb   sy
+  mrs   x0, clidr_el1
+  and   x3, x0, #0x7000000
+  lsr   x3, x3, #23
+  cbz   x3, 5f
+  mrs   x1, id_aa64mmfr2_el1
+  ubfx  x8, x1, #20, #4
+  mov   x10, #0
+1:
+  add   x2, x10, x10, lsr #1
+  lsr   x1, x0, x2
+  and   x1, x1, #7
+  cmp   x1, #2
+  b.lt  4f
+  msr   csselr_el1, x10
+  isb
+  mrs   x1, ccsidr_el1
+  and   x2, x1, #7
+  add   x2, x2, #4
+  cbz   x8, 6f
+  ubfx  x4, x1, #3, #21
+  ubfx  x7, x1, #32, #24
+  b     7f
+6:
+  ubfx  x4, x1, #3, #10
+  ubfx  x7, x1, #13, #15
+7:
+  clz   w5, w4
+2:
+  mov   x9, x4
+3:
+  lsl   x6, x9, x5
+  orr   x11, x10, x6
+  lsl   x6, x7, x2
+  orr   x11, x11, x6
+  dc    cisw, x11
+  subs  x9, x9, #1
+  b.ge  3b
+  subs  x7, x7, #1
+  b.ge  2b
+4:
+  add   x10, x10, #2
+  cmp   x3, x10
+  b.gt  1b
+5:
+  mov   x10, #0
+  msr   csselr_el1, x10
+  dsb   sy
+  isb
+  ret
+
 ASM_FUNCTION_REMOVE_IF_UNREFERENCED
