@@ -10,8 +10,9 @@
   * DRAM that no firmware region claims and no reserved-memory node covers is
     added to the GCD as system memory, up to a fixed amount;
   * the initrd the loader placed in memory (/chosen linux,initrd-start/-end)
-    is published as a read-only block device, so a FAT image in the boot
-    image's ramdisk shows up as a normal volume.
+    is first pinned as reserved memory and then published as a read-only block
+    device, so a FAT image in the boot image's ramdisk shows up as a normal
+    volume without the DXE allocator ever owning its pages.
 
   Nothing here depends on a hardware address; every range comes from the DT.
 **/
@@ -33,6 +34,7 @@
 #define ADD_LIMIT         SIZE_1GB
 #define ADD_BELOW         SIZE_4GB     // stay inside what the MMU setup maps
 #define MAX_FDT_SIZE      SIZE_16MB
+#define MAX_MAPPED_PIECES 8
 //
 // Shared with UniXNULib/Config.c. A fixed-width structure avoids depending on
 // the variable driver while the menu is being configured.
@@ -50,6 +52,9 @@ typedef struct {
   EFI_STATUS  BlockStatus;
   UINT64      InitrdStart;
   UINT64      InitrdEnd;
+  UINT64      MapBase;
+  UINT64      MapEnd;
+  UINT32      MapPieces;
 } SHENG_BOOT_MEMORY_STATUS;
 
 STATIC EFI_GUID  mStatusGuid = {
@@ -66,7 +71,10 @@ PublishStatus (
   IN EFI_STATUS  Map,
   IN EFI_STATUS  Block,
   IN UINT64      InitrdStart,
-  IN UINT64      InitrdEnd
+  IN UINT64      InitrdEnd,
+  IN UINT64      MapBase,
+  IN UINT64      MapEnd,
+  IN UINT32      MapPieces
   )
 {
   STATIC SHENG_BOOT_MEMORY_STATUS  Status;
@@ -81,6 +89,9 @@ PublishStatus (
   Status.BlockStatus  = Block;
   Status.InitrdStart  = InitrdStart;
   Status.InitrdEnd    = InitrdEnd;
+  Status.MapBase      = MapBase;
+  Status.MapEnd       = MapEnd;
+  Status.MapPieces    = MapPieces;
   gBS->InstallConfigurationTable (&mStatusGuid, &Status);
 }
 
@@ -88,6 +99,41 @@ typedef struct {
   UINT64  Base;
   UINT64  End;       // exclusive
 } RANGE;
+
+STATIC
+EFI_STATUS
+MapRangePiece (
+  IN  EFI_PHYSICAL_ADDRESS  Base,
+  IN  UINTN                 Length,
+  IN  EFI_GCD_MEMORY_TYPE   GcdMemoryType,
+  OUT BOOLEAN               *Added
+  )
+{
+  EFI_STATUS  Status;
+
+  *Added = FALSE;
+
+  Status = gDS->AddMemorySpace (
+                  GcdMemoryType,
+                  Base,
+                  Length,
+                  EFI_MEMORY_UC | EFI_MEMORY_WC | EFI_MEMORY_WT | EFI_MEMORY_WB
+                  );
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "SHENGMEM: add mapping 0x%lx-0x%lx %r\n", Base, Base + Length - 1, Status));
+    return Status;
+  }
+
+  *Added = TRUE;
+  Status = gDS->SetMemorySpaceAttributes (Base, Length, EFI_MEMORY_WB);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "SHENGMEM: map attributes 0x%lx-0x%lx %r\n", Base, Base + Length - 1, Status));
+    gDS->RemoveMemorySpace (Base, Length);
+    *Added = FALSE;
+  }
+
+  return Status;
+}
 
 /**
   Temporarily map physical memory which the bootloader used for its device tree.
@@ -102,13 +148,24 @@ EFI_STATUS
 MapFdtRange (
   IN  EFI_PHYSICAL_ADDRESS  Base,
   IN  UINTN                 Length,
+  IN  EFI_GCD_MEMORY_TYPE   AddType,
+  IN  EFI_GCD_MEMORY_TYPE   ExistingType,
+  OUT EFI_PHYSICAL_ADDRESS  *MappedBase,
+  OUT UINTN                 *MappedLength,
+  OUT UINTN                 *MappedCount,
   OUT BOOLEAN               *Added
   )
 {
   EFI_STATUS                       Status;
+  EFI_STATUS                       PieceStatus;
   EFI_GCD_MEMORY_SPACE_DESCRIPTOR  Descriptor;
+  EFI_PHYSICAL_ADDRESS             Cursor;
+  EFI_PHYSICAL_ADDRESS             End;
+  EFI_PHYSICAL_ADDRESS             PieceEnd;
+  UINTN                            Index;
 
-  *Added = FALSE;
+  *MappedCount = 0;
+  *Added       = FALSE;
   if (Length == 0) {
     return EFI_SUCCESS;
   }
@@ -117,34 +174,86 @@ MapFdtRange (
     return EFI_INVALID_PARAMETER;
   }
 
-  Status = gDS->GetMemorySpaceDescriptor (Base, &Descriptor);
-  if (!EFI_ERROR (Status) &&
-      (Descriptor.GcdMemoryType != EfiGcdMemoryTypeNonExistent) &&
-      (Base + Length <= Descriptor.BaseAddress + Descriptor.Length))
-  {
-    // SEC or another DXE component already supplied an identity mapping.
-    return EFI_SUCCESS;
+  End    = Base + Length;
+  Cursor = Base;
+  Status = EFI_SUCCESS;
+  while (Cursor < End) {
+    PieceStatus = gDS->GetMemorySpaceDescriptor (Cursor, &Descriptor);
+    if (EFI_ERROR (PieceStatus)) {
+      Status = PieceStatus;
+      break;
+    }
+
+    PieceEnd = MIN (End, Descriptor.BaseAddress + Descriptor.Length);
+    if (PieceEnd <= Cursor) {
+      Status = EFI_DEVICE_ERROR;
+      break;
+    }
+
+    if (Descriptor.GcdMemoryType == EfiGcdMemoryTypeNonExistent) {
+      PieceStatus = MapRangePiece (Cursor, (UINTN)(PieceEnd - Cursor), AddType, Added);
+      if (EFI_ERROR (PieceStatus)) {
+        Status = PieceStatus;
+        break;
+      }
+
+      if (*Added) {
+        if (*MappedCount >= MAX_MAPPED_PIECES) {
+          gDS->RemoveMemorySpace (Cursor, (UINTN)(PieceEnd - Cursor));
+          Status = EFI_OUT_OF_RESOURCES;
+          break;
+        }
+
+        MappedBase[*MappedCount]   = Cursor;
+        MappedLength[*MappedCount] = (UINTN)(PieceEnd - Cursor);
+        (*MappedCount)++;
+      }
+    } else {
+      //
+      // An existing mapping is only acceptable when its owner and type match
+      // the caller's contract. The DTB accepts any identity mapping; initrd
+      // pages must already be unowned reserved RAM.
+      //
+      if (((ExistingType != EfiGcdMemoryTypeNonExistent) &&
+           (Descriptor.GcdMemoryType != ExistingType)) ||
+          ((ExistingType != EfiGcdMemoryTypeNonExistent) &&
+           (Descriptor.ImageHandle != NULL)))
+      {
+        DEBUG ((
+          DEBUG_ERROR,
+          "SHENGMEM: range 0x%lx-0x%lx has incompatible GCD type %u owner %p\n",
+          Cursor,
+          PieceEnd - 1,
+          Descriptor.GcdMemoryType,
+          Descriptor.ImageHandle
+          ));
+        Status = EFI_ACCESS_DENIED;
+        break;
+      }
+
+      if (ExistingType != EfiGcdMemoryTypeNonExistent) {
+        PieceStatus = gDS->SetMemorySpaceAttributes (Cursor, (UINTN)(PieceEnd - Cursor), EFI_MEMORY_WB);
+        if (EFI_ERROR (PieceStatus)) {
+          DEBUG ((DEBUG_ERROR, "SHENGMEM: reuse mapping 0x%lx-0x%lx %r\n",
+                  Cursor, PieceEnd - 1, PieceStatus));
+          Status = PieceStatus;
+          break;
+        }
+      }
+    }
+
+    Cursor = PieceEnd;
   }
 
-  //
-  // MMIO prevents the DXE allocator from handing out the live DTB before it is
-  // copied, while still allowing normal write-back accesses from the CPU.
-  //
-  Status = gDS->AddMemorySpace (
-                  EfiGcdMemoryTypeMemoryMappedIo,
-                  Base,
-                  Length,
-                  EFI_MEMORY_UC | EFI_MEMORY_WC | EFI_MEMORY_WT | EFI_MEMORY_WB
-                  );
   if (EFI_ERROR (Status)) {
-    return Status;
-  }
+    for (Index = 0; Index < *MappedCount; Index++) {
+      gDS->RemoveMemorySpace (MappedBase[Index], MappedLength[Index]);
+    }
 
-  *Added = TRUE;
-  Status = gDS->SetMemorySpaceAttributes (Base, Length, EFI_MEMORY_WB);
-  if (EFI_ERROR (Status)) {
-    gDS->RemoveMemorySpace (Base, Length);
-    *Added = FALSE;
+    *MappedCount = 0;
+    *Added       = FALSE;
+  } else {
+    *Added = *MappedCount != 0;
   }
 
   return Status;
@@ -152,23 +261,22 @@ MapFdtRange (
 
 STATIC
 VOID
-ReleaseFdtRange (
-  IN EFI_PHYSICAL_ADDRESS  Base,
-  IN UINTN                 Length,
-  IN BOOLEAN               Added
+ReleaseMappedPieces (
+  IN EFI_PHYSICAL_ADDRESS  *MappedBase,
+  IN UINTN                 *MappedLength,
+  IN OUT UINTN             *MappedCount
   )
 {
-  EFI_STATUS  Status;
+  UINTN       Index;
 
-  if (!Added) {
-    return;
+  for (Index = 0; Index < *MappedCount; Index++) {
+    if (EFI_ERROR (gDS->RemoveMemorySpace (MappedBase[Index], MappedLength[Index]))) {
+      DEBUG ((DEBUG_ERROR, "SHENGMEM: failed to release mapping 0x%lx-0x%lx\n",
+              MappedBase[Index], MappedBase[Index] + MappedLength[Index] - 1));
+    }
   }
 
-  Status = gDS->RemoveMemorySpace (Base, Length);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "SHENGMEM: failed to release DTB range 0x%lx-0x%lx %r\n",
-            Base, Base + Length - 1, Status));
-  }
+  *MappedCount = 0;
 }
 
 /**
@@ -186,9 +294,15 @@ MapBootFdt (
   OUT UINTN                 *FdtSize,
   OUT EFI_PHYSICAL_ADDRESS  *ProbeBase,
   OUT UINTN                 *ProbeSize,
+  OUT EFI_PHYSICAL_ADDRESS  *ProbeMappedBase,
+  OUT UINTN                 *ProbeMappedLength,
+  OUT UINTN                 *ProbeMappedCount,
   OUT BOOLEAN               *ProbeAdded,
   OUT EFI_PHYSICAL_ADDRESS  *TailBase,
   OUT UINTN                 *TailSize,
+  OUT EFI_PHYSICAL_ADDRESS  *TailMappedBase,
+  OUT UINTN                 *TailMappedLength,
+  OUT UINTN                 *TailMappedCount,
   OUT BOOLEAN               *TailAdded
   )
 {
@@ -201,9 +315,11 @@ MapBootFdt (
   *FdtSize    = 0;
   *ProbeBase  = 0;
   *ProbeSize  = 0;
+  *ProbeMappedCount = 0;
   *ProbeAdded = FALSE;
   *TailBase   = 0;
   *TailSize   = 0;
+  *TailMappedCount = 0;
   *TailAdded  = FALSE;
   if ((Dtb == 0) || ((Dtb & 7) != 0)) {
     return EFI_INVALID_PARAMETER;
@@ -214,7 +330,16 @@ MapBootFdt (
   *ProbeBase = Base;
   *ProbeSize = (UINTN)(ProbeEnd - Base);
 
-  Status = MapFdtRange (Base, *ProbeSize, ProbeAdded);
+  Status = MapFdtRange (
+             Base,
+             *ProbeSize,
+             EfiGcdMemoryTypeMemoryMappedIo,
+             EfiGcdMemoryTypeNonExistent,
+             ProbeMappedBase,
+             ProbeMappedLength,
+             ProbeMappedCount,
+             ProbeAdded
+             );
   if (EFI_ERROR (Status)) {
     goto Done;
   }
@@ -234,7 +359,16 @@ MapBootFdt (
   if (FullEnd > ProbeEnd) {
     *TailBase = ProbeEnd;
     *TailSize = (UINTN)(FullEnd - ProbeEnd);
-    Status    = MapFdtRange (*TailBase, *TailSize, TailAdded);
+    Status    = MapFdtRange (
+                  *TailBase,
+                  *TailSize,
+                  EfiGcdMemoryTypeMemoryMappedIo,
+                  EfiGcdMemoryTypeNonExistent,
+                  TailMappedBase,
+                  TailMappedLength,
+                  TailMappedCount,
+                  TailAdded
+                  );
     if (EFI_ERROR (Status)) {
       goto Done;
     }
@@ -249,13 +383,15 @@ MapBootFdt (
   return EFI_SUCCESS;
 
 Done:
-  ReleaseFdtRange (*TailBase, *TailSize, *TailAdded);
-  ReleaseFdtRange (*ProbeBase, *ProbeSize, *ProbeAdded);
+  ReleaseMappedPieces (TailMappedBase, TailMappedLength, TailMappedCount);
+  ReleaseMappedPieces (ProbeMappedBase, ProbeMappedLength, ProbeMappedCount);
   *FdtSize    = 0;
   *ProbeSize  = 0;
+  *ProbeMappedCount = 0;
   *ProbeAdded = FALSE;
   *TailBase   = 0;
   *TailSize   = 0;
+  *TailMappedCount = 0;
   *TailAdded  = FALSE;
   return Status;
 }
@@ -376,7 +512,9 @@ Subtract (
 STATIC
 VOID
 AddMemory (
-  IN CONST VOID  *Fdt
+  IN CONST VOID  *Fdt,
+  IN UINT64      InitrdBase,
+  IN UINT64      InitrdEnd
   )
 {
   EFI_STATUS                       Status;
@@ -402,6 +540,7 @@ AddMemory (
   UINT64                           Added;
   UINT64                           Base;
   UINT64                           End;
+  RANGE                            Initrd;
 
   Root         = FdtPathOffset (Fdt, "/");
   AddressCells = GetCells (Fdt, Root, "#address-cells", 2);
@@ -467,6 +606,16 @@ AddMemory (
     PieceCount = 1;
     for (Other = 0; Other < ReservedCount; Other++) {
       PieceCount = Subtract (Pieces, PieceCount, ReservedRanges[Other]);
+    }
+
+    //
+    // The initrd is handled before general DRAM, but subtract it here as well
+    // so a failed ramdisk setup can never hand its pages to the allocator.
+    //
+    if (InitrdEnd > InitrdBase) {
+      Initrd.Base = InitrdBase;
+      Initrd.End  = InitrdEnd;
+      PieceCount  = Subtract (Pieces, PieceCount, Initrd);
     }
 
     for (Other = 0; (Other < PieceCount) && (Added < ADD_LIMIT); Other++) {
@@ -642,7 +791,10 @@ PublishInitrd (
   OUT UINT64      *InitrdStart,
   OUT UINT64      *InitrdEnd,
   OUT EFI_STATUS  *MapStatus,
-  OUT EFI_STATUS  *BlockStatus
+  OUT EFI_STATUS  *BlockStatus,
+  OUT UINT64      *MappedBase,
+  OUT UINT64      *MappedEnd,
+  OUT UINT32      *MappedPieces
   )
 {
   EFI_STATUS  Status;
@@ -657,11 +809,18 @@ PublishInitrd (
   UINT64      End;
   EFI_HANDLE  Handle;
   BOOLEAN     Added;
+  EFI_PHYSICAL_ADDRESS  PieceBase[MAX_MAPPED_PIECES];
+  UINTN                 PieceLength[MAX_MAPPED_PIECES];
+  UINTN                 PieceCount;
 
   *InitrdStart = 0;
   *InitrdEnd   = 0;
   *MapStatus   = EFI_NOT_FOUND;
   *BlockStatus = EFI_NOT_FOUND;
+  *MappedBase  = 0;
+  *MappedEnd   = 0;
+  *MappedPieces = 0;
+  PieceCount = 0;
   Chosen = FdtPathOffset (Fdt, "/chosen");
   if (Chosen < 0) {
     DEBUG ((DEBUG_ERROR, "SHENGMEM: no /chosen\n"));
@@ -708,8 +867,20 @@ PublishInitrd (
     return EFI_INVALID_PARAMETER;
   }
 
-  Status = MapFdtRange (MapBase, (UINTN)(MapEnd - MapBase), &Added);
+  Status = MapFdtRange (
+             MapBase,
+             (UINTN)(MapEnd - MapBase),
+             EfiGcdMemoryTypeReserved,
+             EfiGcdMemoryTypeReserved,
+             PieceBase,
+             PieceLength,
+             &PieceCount,
+             &Added
+             );
   *MapStatus = Status;
+  *MappedBase = MapBase;
+  *MappedEnd = MapEnd;
+  *MappedPieces = (UINT32)PieceCount;
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "SHENGMEM: failed to map initrd 0x%lx-0x%lx %r\n",
             MapBase, MapEnd - 1, Status));
@@ -764,14 +935,23 @@ ShengBootMemoryDxeEntry (
   UINTN              FdtSize;
   EFI_PHYSICAL_ADDRESS  ProbeBase;
   UINTN              ProbeSize;
+  EFI_PHYSICAL_ADDRESS  ProbeMappedBase[MAX_MAPPED_PIECES];
+  UINTN              ProbeMappedLength[MAX_MAPPED_PIECES];
+  UINTN              ProbeMappedCount;
   BOOLEAN            ProbeAdded;
   EFI_PHYSICAL_ADDRESS  TailBase;
   UINTN              TailSize;
+  EFI_PHYSICAL_ADDRESS  TailMappedBase[MAX_MAPPED_PIECES];
+  UINTN              TailMappedLength[MAX_MAPPED_PIECES];
+  UINTN              TailMappedCount;
   BOOLEAN            TailAdded;
+  UINT64             InitrdMapBase;
+  UINT64             InitrdMapEnd;
+  UINT32             InitrdMapPieces;
 
   Hob = GetFirstGuidHob (&gSiliciumEntryArgHobGuid);
   if (Hob == NULL) {
-    PublishStatus (0, 0, EFI_NOT_FOUND, EFI_NOT_FOUND, EFI_NOT_FOUND, EFI_NOT_FOUND, 0, 0);
+    PublishStatus (0, 0, EFI_NOT_FOUND, EFI_NOT_FOUND, EFI_NOT_FOUND, EFI_NOT_FOUND, 0, 0, 0, 0, 0);
     DEBUG ((DEBUG_ERROR, "SHENGMEM: no entry argument HOB\n"));
     return EFI_SUCCESS;
   }
@@ -782,13 +962,19 @@ ShengBootMemoryDxeEntry (
              &FdtSize,
              &ProbeBase,
              &ProbeSize,
+             ProbeMappedBase,
+             ProbeMappedLength,
+             &ProbeMappedCount,
              &ProbeAdded,
              &TailBase,
              &TailSize,
+             TailMappedBase,
+             TailMappedLength,
+             &TailMappedCount,
              &TailAdded
              );
   if (EFI_ERROR (Status)) {
-    PublishStatus (1, Dtb, Status, EFI_NOT_FOUND, EFI_NOT_FOUND, EFI_NOT_FOUND, 0, 0);
+    PublishStatus (1, Dtb, Status, EFI_NOT_FOUND, EFI_NOT_FOUND, EFI_NOT_FOUND, 0, 0, 0, 0, 0);
     DEBUG ((DEBUG_ERROR, "SHENGMEM: x0 0x%lx is not a device tree\n", Dtb));
     return EFI_SUCCESS;
   }
@@ -796,8 +982,17 @@ ShengBootMemoryDxeEntry (
   Fdt = (VOID *)(UINTN)Dtb;
   DEBUG ((DEBUG_ERROR, "SHENGMEM: device tree at 0x%lx, %u bytes\n", Dtb, (UINT32)FdtSize));
 
-  AddMemory (Fdt);
-  InitrdStatus = PublishInitrd (Fdt, &InitrdStart, &InitrdEnd, &MapStatus, &BlockStatus);
+  InitrdStatus = PublishInitrd (
+                   Fdt,
+                   &InitrdStart,
+                   &InitrdEnd,
+                   &MapStatus,
+                   &BlockStatus,
+                   &InitrdMapBase,
+                   &InitrdMapEnd,
+                   &InitrdMapPieces
+                   );
+  AddMemory (Fdt, InitrdMapBase, InitrdMapEnd);
 
   PublishStatus (
     1,
@@ -807,9 +1002,12 @@ ShengBootMemoryDxeEntry (
     MapStatus,
     BlockStatus,
     InitrdStart,
-    InitrdEnd
+    InitrdEnd,
+    InitrdMapBase,
+    InitrdMapEnd,
+    InitrdMapPieces
     );
-  ReleaseFdtRange (TailBase, TailSize, TailAdded);
-  ReleaseFdtRange (ProbeBase, ProbeSize, ProbeAdded);
+  ReleaseMappedPieces (TailMappedBase, TailMappedLength, &TailMappedCount);
+  ReleaseMappedPieces (ProbeMappedBase, ProbeMappedLength, &ProbeMappedCount);
   return EFI_SUCCESS;
 }
