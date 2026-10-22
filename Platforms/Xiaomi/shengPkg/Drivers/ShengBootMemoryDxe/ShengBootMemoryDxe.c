@@ -136,16 +136,16 @@ MapRangePiece (
 }
 
 /**
-  Temporarily map physical memory which the bootloader used for its device tree.
+  Add a physical range to the GCD in descriptor-sized pieces.
 
-  SEC can read the bootloader's DTB while its identity map is active, but the
-  DXE page tables only cover the platform's declared memory regions. The DTB
-  usually sits in a DRAM hole that ShengBootMemoryDxe itself has not published
-  yet, so it must be mapped before libfdt reads its header.
+  Newly added pieces are recorded so a temporary caller can release exactly
+  the space it owns. When ExistingType is not NonExistent, pre-existing pieces
+  must match that type and have no owner. This lets the DTB accept any identity
+  mapping while the initrd requires unallocated Reserved RAM.
 **/
 STATIC
 EFI_STATUS
-MapFdtRange (
+MapGcdRange (
   IN  EFI_PHYSICAL_ADDRESS  Base,
   IN  UINTN                 Length,
   IN  EFI_GCD_MEMORY_TYPE   AddType,
@@ -330,7 +330,7 @@ MapBootFdt (
   *ProbeBase = Base;
   *ProbeSize = (UINTN)(ProbeEnd - Base);
 
-  Status = MapFdtRange (
+  Status = MapGcdRange (
              Base,
              *ProbeSize,
              EfiGcdMemoryTypeMemoryMappedIo,
@@ -359,7 +359,7 @@ MapBootFdt (
   if (FullEnd > ProbeEnd) {
     *TailBase = ProbeEnd;
     *TailSize = (UINTN)(FullEnd - ProbeEnd);
-    Status    = MapFdtRange (
+    Status    = MapGcdRange (
                   *TailBase,
                   *TailSize,
                   EfiGcdMemoryTypeMemoryMappedIo,
@@ -867,7 +867,7 @@ PublishInitrd (
     return EFI_INVALID_PARAMETER;
   }
 
-  Status = MapFdtRange (
+  Status = MapGcdRange (
              MapBase,
              (UINTN)(MapEnd - MapBase),
              EfiGcdMemoryTypeReserved,
