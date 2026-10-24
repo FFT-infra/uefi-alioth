@@ -13,6 +13,20 @@
 .set CTRL_SPAN_BIT, BIT23
 
 ASM_FUNC (_ModuleEntryPoint)
+  // Exceptions must use the stack installed below, not a stale SP_EL1.
+  msr   SPSel, #1
+  isb
+
+  // Preserve the bootloader DTB pointer while cleaning stale cache lines
+  // before the first store of this stage.
+  mov   x20, x0
+  bl    ASM_PFX (SecCleanInvalidateDataCacheAll)
+  mov   x0, x20
+
+  // Keep x0 for the platform. A Linux-style loader passes the DTB here.
+  adr   x1, ASM_PFX (gSecEntryArg0)
+  str   x0, [x1]
+
   // Do Platform Specific Initialization
   bl    ASM_PFX (PlatformAssemblyInitialize)
 
@@ -61,3 +75,9 @@ ASM_PFX (MainEntryPoint):
 
   // Do Infinite Spin
   b     .
+
+  // First argument of the previous stage, written once at entry.
+  .align 3
+  .global ASM_PFX (gSecEntryArg0)
+ASM_PFX (gSecEntryArg0):
+  .quad 0

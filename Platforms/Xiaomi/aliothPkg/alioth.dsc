@@ -36,6 +36,11 @@
 
 [PcdsFixedAtBuild]
   #
+  # Keep UniXNU's early diagnostics visible on the frame-buffer console.
+  #
+  gUniXNUPkgTokenSpaceGuid.PcdUniXNUDebugLevel|0x80000000
+
+  #
   # DDR Memory
   #
   gArmTokenSpaceGuid.PcdSystemMemoryBase|0x80000000
@@ -93,3 +98,15 @@
   # ACPI Tables
   #
   alioth/AcpiTables.inf
+
+  #
+  # UniXNU: boot manager, registrar, payload block device and XNU loader
+  #
+  UniXNUPkg/Application/UniXNU/UniXNU.inf
+  UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
+  shengPkg/Drivers/ShengBootMemoryDxe/ShengBootMemoryDxe.inf
+  DarwinBootPkg/Driver/DarwinBoot.inf
+
+[LibraryClasses]
+  UniXNULib|UniXNUPkg/Library/UniXNULib/UniXNULib.inf
+  FdtLib|MdePkg/Library/BaseFdtLib/BaseFdtLib.inf
