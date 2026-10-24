@@ -50,6 +50,9 @@
   # The boot image ramdisk (ALIOTHESP) as a read-only block device. Every
   # range comes from the bootloader-provided device tree.
   INF shengPkg/Drivers/ShengBootMemoryDxe/ShengBootMemoryDxe.inf
+  # Publish the Mu-Silicium FDT initrd as a read-only block device so UniXNU
+  # can find the payload volume.
+  INF UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.inf
   # DarwinBoot is in the firmware because this image's verification refuses a
   # driver loaded from a volume.
   INF DarwinBootPkg/Driver/DarwinBoot.inf

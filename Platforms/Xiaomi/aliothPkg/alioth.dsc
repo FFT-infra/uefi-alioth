@@ -105,6 +105,7 @@
   UniXNUPkg/Application/UniXNU/UniXNU.inf
   UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
   shengPkg/Drivers/ShengBootMemoryDxe/ShengBootMemoryDxe.inf
+  UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.inf
   DarwinBootPkg/Driver/DarwinBoot.inf
 
 [LibraryClasses]
