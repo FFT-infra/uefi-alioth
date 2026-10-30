@@ -2,6 +2,26 @@
 
 <!-- ![Banner](https://github.com/Project-Silicium/Mu-Silicium/blob/main/Resources/Pictures/Banner.png) -->
 
+## This repository
+
+This is the Mu-Silicium port for the Xiaomi Redmi K40 (`alioth`, `M2012K11AC`,
+SM8250-AC), used as the firmware layer of the UniXNU port for that board.
+
+| Item | Value |
+| --- | --- |
+| Platform package | `Platforms/Xiaomi/aliothPkg/` |
+| Firmware config / DSC | `alioth` / `Platforms/Xiaomi/aliothPkg/alioth.dsc` |
+| Firmware volume | `Build/aliothPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd` (3,145,728 bytes) |
+| Board DTB | `Resources/DTBs/alioth.dtb` |
+| Build from | `../UniXNU`: `./unixnu build firmware -D ../UniXNU-alioth --uefi .` |
+
+Read [`AGENTS.md`](AGENTS.md) before changing anything. It lists the required
+UniXNU integration, the known gap in the DSC `[Components]`, and the firmware
+log-export step that is not wired yet.
+
+Device page: <https://unixnu.com/zh/devices/alioth>.
+Porting record: [`../UniXNU-alioth/porting.toml`](../UniXNU-alioth/porting.toml).
+
 ## Description
 
 This Project focuses on Making ARM-Based Devices Boot Operating Systems like Windows or Linux using Custom UEFI Firmware.
