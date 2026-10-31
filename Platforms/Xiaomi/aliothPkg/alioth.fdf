@@ -106,6 +106,9 @@ READ_LOCK_STATUS   = TRUE
   #  SECTION UI = "DeviceTreeBlob"
   #}
 
+  # Tools -> Advanced Logger, the firmware log as QR codes.
+  INF UniXNUPkg/Driver/AdvancedLogDxe/AdvancedLogDxe.inf
+
   !include QcomPkg/Extra.fdf.inc
 
 [FV.FVMAIN_COMPACT]
