@@ -64,9 +64,10 @@ STATIC EFI_MEMORY_REGION_DESCRIPTOR gMemoryDescriptor[] = {
   // 0x880000000 + 1 GiB and 0x8C0000000 + 5 GiB, category SDRAM). DxeCore got a synchronous external abort
   // clearing memory at 0x8BB300000, so the top of the first entry (to 0x8C0000000) is not given to UEFI.
   {"DRAM bank 1 low", 0x880000000, 0x3B300000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
-  // Full five-GiB extent reported by the hardware SMEM partition table.
-  // First four GiB reached userland; the added last GiB needs hardware validation.
-  {"DRAM bank 1 high", 0x8C0000000, 0x140000000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
+  // Full nine-GiB extent. The Linux reader sees 0x8C0000000..0xAFFFFFFFF as System RAM on the 12 GB
+  // unit: the SMEM partition table entry covers five GiB and the unit adds the 0xA00000000 tail.
+  // The first five GiB reached userland. The tail keeps an 8 GiB Darwin window inside one run.
+  {"DRAM bank 1 high", 0x8C0000000, 0x240000000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
   {"IMEM Base", 0x14680000, 0x0002A000, NoHob, MMAP_IO, INITIALIZED, Conv, NS_DEVICE},
   {"IMEM Cookie Base", 0x146AA000, 0x00016000, AddDev, MMAP_IO, INITIALIZED, Conv, NS_DEVICE},
   {"IPC_ROUTER_TOP", 0x00400000, 0x00100000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
@@ -230,8 +231,8 @@ ShengPrepareMemoryMap (IN CONST VOID *Fdt)
     UINT64 Base = Free[I].Base;
     UINT64 End = Free[I].End;
     if (!((Base >= 0x80000000ULL && End <= 0x100000000ULL) ||
-          (Base >= 0x880000000ULL && End <= 0xa00000000ULL))) { return; }
-    if (Base == 0x8c0000000ULL && End == 0xa00000000ULL) { HasHighBank = TRUE; }
+          (Base >= 0x880000000ULL && End <= 0xb00000000ULL))) { return; }
+    if (Base == 0x8c0000000ULL && (End == 0xa00000000ULL || End == 0xb00000000ULL)) { HasHighBank = TRUE; }
     for (UINTN J = 0; J < I; J++) {
       if (Base < Free[J].End && End > Free[J].Base) { return; }
     }
@@ -263,7 +264,7 @@ ShengPrepareMemoryMap (IN CONST VOID *Fdt)
   Inputs[1] = (SHENG_RAM_RANGE){(UINT64)(UINTN)Fdt, (UINT64)(UINTN)Fdt + Total};
   for (UINTN I = 0; I < ARRAY_SIZE (Inputs); I++) {
     if (!((Inputs[I].Base >= 0x80000000ULL && Inputs[I].End <= 0x100000000ULL) ||
-          (Inputs[I].Base >= 0x880000000ULL && Inputs[I].End <= 0xa00000000ULL))) { return; }
+          (Inputs[I].Base >= 0x880000000ULL && Inputs[I].End <= 0xb00000000ULL))) { return; }
     Inputs[I].Base &= ~SHENG_PAGE_MASK;
     Inputs[I].End = (Inputs[I].End + SHENG_PAGE_MASK) & ~SHENG_PAGE_MASK;
     if (!ShengCut (Free, &FreeCount, Inputs[I])) { return; }
